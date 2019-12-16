@@ -1,0 +1,413 @@
+---
+title: "Translationally regulated transcription factors"
+output:
+  html_notebook:
+    toc: true
+    number_sections: true
+    theme: readable
+author: Marat Mufteev
+date: "`r format(Sys.time(), 'Generated on %d %B, %Y')`"
+---
+
+Upload libraries
+```{r}
+library(dplyr)
+library(ggplot2)
+```
+
+Current directory to generate data paths
+```{r}
+current_dir = getwd()
+```
+
+Upload quantile normalized RE (average and sd) and expression data
+```{r}
+ids_path = paste(current_dir, 
+                 "/data/annotation/grch38.transcript.genes.csv", 
+                 sep = "")
+RE_path = paste(current_dir, 
+                "/data/RE.deseq.horizontal.quant_normalized.stats.tab", 
+                sep = "")
+TPM_path = paste(current_dir, 
+                 "/data/quants.clean.stats.sf", 
+                 sep = "")
+
+RE = read.table(RE_path, header = TRUE) 
+ids = read.csv(ids_path, header = TRUE)
+expression = read.csv(TPM_path, header = TRUE) %>%
+             select(transcript, contains("TPM")) %>%
+             select(transcript, contains("mean")) %>%
+             left_join(ids, by = "transcript") %>%
+             select(-transcript) %>%
+             group_by(gene) %>%
+             summarise_all(sum)
+```
+
+Upload list of transcription factors (TFs) annotated in Hughes paper ("The Human Transcription Factors" Cell, 2018)
+```{r}
+TF_path = paste(current_dir, 
+                "/data/annotation/Hughes_TF.csv", 
+                sep = "")
+TFs = read.csv(TF_path, header = TRUE)
+```
+
+
+# Find TFs with responsive targets
+
+
+List of targets for an available subset of TFs is downloaded from iRegulon paper ("iRegulon: From a Gene List to a Gene Regulatory Network Using Large Motif and Track Collections" PLOS, 2014). Targets are sorted by "strength".
+
+We suggest that there is a minimal strength required to see the shifts in abundance of targets.
+
+First we create a table with targets abundance averaged within each strength bin.
+
+Table metatargetome is already sorted by Strength. No need for extra sorting before rolling average.
+```{r}
+data_path = paste(current_dir, 
+                  "/data/iRegulon_targets_diff_TF", 
+                  sep = "")
+
+# The loop might take some time for processing
+collect_tbl = data.frame()
+for (targets_file in list.files(data_path, pattern = ".csv", full.names = T)) {
+  TF_name = strsplit(targets_file, split = " ")[[1]][5]
+  print(paste("Processing ", TF_name, sep = ""))
+  
+  # Upload iRegulon TF targets data
+  metatargetome = read.csv(targets_file,
+                           header = TRUE)
+  meta_expr_tbl = left_join(metatargetome %>% rename(gene = Target.Gene), 
+                            expression, by = "gene")
+  number_of_targets = dim(meta_expr_tbl)[1]
+  
+  if (number_of_targets > 51) {
+    # window size is a number of genes with similar strength used for averaging
+    # in a sliding window
+    for (window_size in c(1, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50)) {
+      print(paste("    window size ", window_size, sep = ""))
+      
+      # Choose first target strength as representative of the window
+      stengths = zoo::rollapply(meta_expr_tbl$Strength, width = window_size, 
+                                FUN = function(x) first(x))
+      # Even though the variable is called "mean" its actually median
+      iPSC_mean = zoo::rollapply(meta_expr_tbl$TPM.Input_iPS37.mean, width = window_size, 
+                                   FUN = function(x) median(x, na.rm = TRUE))
+      NPC_mean = zoo::rollapply(meta_expr_tbl$TPM.Input_NPC37.mean, width = window_size, 
+                                FUN = function(x) median(x, na.rm = TRUE))
+      Neu_mean = zoo::rollapply(meta_expr_tbl$TPM.Input_Neu37.mean, width = window_size, 
+                                FUN = function(x) median(x, na.rm = TRUE))
+      
+      fit_tbl = data.frame(Strength = stengths,
+                           TPM_iPSC_mean = iPSC_mean,
+                           TPM_NPC_mean = NPC_mean,
+                           TPM_Neu_mean = Neu_mean) %>%
+                mutate(delta_NPC_iPSC = TPM_NPC_mean - TPM_iPSC_mean,
+                       delta_Neu_NPC = TPM_Neu_mean - TPM_NPC_mean) %>%
+                select(-contains("TPM"))
+      fit_tbl$TF = TF_name
+      fit_tbl$window = window_size
+      collect_tbl = bind_rows(collect_tbl, fit_tbl)
+    }
+  }
+  
+  # Some TFs have less targets. Adjust the range of window sizes
+  if (number_of_targets < 51 & number_of_targets > 40) {
+    for (window_size in c(1, 5, 10, 15, 20, 25, 30, 35, 40)) {
+      print(paste("    window size ", window_size, sep = ""))
+      
+      # Choose first target strength as representative of the window
+      stengths = zoo::rollapply(meta_expr_tbl$Strength, width = window_size, 
+                                FUN = function(x) first(x))
+      # Even though the variable is called "mean" its actually median
+      iPSC_mean = zoo::rollapply(meta_expr_tbl$TPM.Input_iPS37.mean, width = window_size, 
+                                   FUN = function(x) median(x, na.rm = TRUE))
+      NPC_mean = zoo::rollapply(meta_expr_tbl$TPM.Input_NPC37.mean, width = window_size, 
+                                FUN = function(x) median(x, na.rm = TRUE))
+      Neu_mean = zoo::rollapply(meta_expr_tbl$TPM.Input_Neu37.mean, width = window_size, 
+                                FUN = function(x) median(x, na.rm = TRUE))
+      
+      fit_tbl = data.frame(Strength = stengths,
+                           TPM_iPSC_mean = iPSC_mean,
+                           TPM_NPC_mean = NPC_mean,
+                           TPM_Neu_mean = Neu_mean) %>%
+                mutate(delta_NPC_iPSC = TPM_NPC_mean - TPM_iPSC_mean,
+                       delta_Neu_NPC = TPM_Neu_mean - TPM_NPC_mean) %>%
+                select(-contains("TPM"))
+      fit_tbl$TF = TF_name
+      fit_tbl$window = window_size
+      collect_tbl = bind_rows(collect_tbl, fit_tbl)
+    }
+  }
+  
+  # Some TFs have less targets. We adjust the range of window sizes
+  if (number_of_targets < 40 & number_of_targets > 30) {
+    for (window_size in c(1, 5, 10, 15, 20, 25, 30)) {
+      print(paste("    window size ", window_size, sep = ""))
+      
+      # Choose first target strength as representative of the window
+      stengths = zoo::rollapply(meta_expr_tbl$Strength, width = window_size, 
+                                FUN = function(x) first(x))
+      # Even though the variable is called "mean" its actually median
+      iPSC_mean = zoo::rollapply(meta_expr_tbl$TPM.Input_iPS37.mean, width = window_size, 
+                                   FUN = function(x) median(x, na.rm = TRUE))
+      NPC_mean = zoo::rollapply(meta_expr_tbl$TPM.Input_NPC37.mean, width = window_size, 
+                                FUN = function(x) median(x, na.rm = TRUE))
+      Neu_mean = zoo::rollapply(meta_expr_tbl$TPM.Input_Neu37.mean, width = window_size, 
+                                FUN = function(x) median(x, na.rm = TRUE))
+      
+      fit_tbl = data.frame(Strength = stengths,
+                           TPM_iPSC_mean = iPSC_mean,
+                           TPM_NPC_mean = NPC_mean,
+                           TPM_Neu_mean = Neu_mean) %>%
+                mutate(delta_NPC_iPSC = TPM_NPC_mean - TPM_iPSC_mean,
+                       delta_Neu_NPC = TPM_Neu_mean - TPM_NPC_mean) %>%
+                select(-contains("TPM"))
+      fit_tbl$TF = TF_name
+      fit_tbl$window = window_size
+      collect_tbl = bind_rows(collect_tbl, fit_tbl)
+    }
+  }
+}
+```
+
+Define strength threshold for each TF, done manually at the moment. It would be better to automate
+this step.
+Search for minimal value of strength at which shift in averaged TPM is consistently greater/smaller than 0 for all window sizes.
+```{r}
+ggplot(data = collect_tbl,
+       aes(x = Strength,
+           y = delta_NPC_iPSC,
+           colour = window)) +
+  geom_point() +
+  geom_hline(yintercept = 0, colour = "red") +
+  scale_color_gradient(low = "white", high = "dark green") +
+  facet_wrap(~TF, scales = "free") +
+  ylim(-50, 50) 
+```
+
+
+# Analysis of iPSC to NPC transition
+
+
+Next we seek for the averaged shift in TPM for responsive targets (strength larger than a threshold defined above) of TFs.
+```{r}
+master_tbl = data.frame()
+
+# Strength thresholds for TFs in iPSC to NPC transition
+strength_filter = list(CDC5L = 0, NANOG = 25, NFE2L3 = 25, KLF4 = 100, NR6A1 = 12,
+                       MEF2C = 50, HOXC8 = 80, HOXC4 = 75, POU2F2 = 50, POU5F1 = 50,
+                       TAL1 = 50, ZFP42 = 90, HOXA3 = 90, HOXA6 = 65)
+
+# Estimate shift in RE of a TF
+RE_tbl = RE %>%
+         mutate(TF = gene) %>%
+         filter(TF %in% TFs$List.of.human.TFs.Hughes.paper) %>%
+         mutate(log_RE_FC_NPC_iPSC = log(RE_NPC37.mean/RE_iPS37.mean),
+                log_RE_FC_Neu_NPC = log(RE_Neu37.mean/RE_NPC37.mean),
+                Z_NPC_iPSC = abs((RE_NPC37.mean - RE_iPS37.mean)/sqrt(RE_NPC37.sd**2 + RE_iPS37.sd**2)),
+                Z_Neu_NPC = abs((RE_Neu37.mean - RE_NPC37.mean)/sqrt(RE_Neu37.sd**2 + RE_NPC37.sd**2))) %>%
+         select(TF, log_RE_FC_NPC_iPSC, log_RE_FC_Neu_NPC, Z_NPC_iPSC, Z_Neu_NPC)
+
+# Further analysis is done for the window of size 10.
+window_size = 10
+for (TF_name in names(strength_filter)) {
+  targets_file = list.files(data_path, pattern = TF_name, full.names = T)
+  metatargetome = read.csv(targets_file,
+                           header = TRUE)
+  
+  minimal_strength = strength_filter[[TF_name]]
+  meta_expr_tbl = left_join(metatargetome %>% rename(gene = Target.Gene), 
+                            expression, by = "gene") %>%
+                  filter(Strength > minimal_strength) %>%
+                  mutate(TF = TF_name)
+  number_of_targets = dim(meta_expr_tbl)[1]
+  
+  if (number_of_targets > 11) {
+    # Choose first target strength as representative of the window
+    stengths = zoo::rollapply(meta_expr_tbl$Strength, width = window_size, 
+                              FUN = function(x) first(x))
+    # Even though the variable is called "mean" its actually median
+    iPSC_mean = zoo::rollapply(meta_expr_tbl$TPM.Input_iPS37.mean, width = window_size, 
+                               FUN = function(x) median(x, na.rm = TRUE))
+    NPC_mean = zoo::rollapply(meta_expr_tbl$TPM.Input_NPC37.mean, width = window_size, 
+                              FUN = function(x) median(x, na.rm = TRUE))
+    Neu_mean = zoo::rollapply(meta_expr_tbl$TPM.Input_Neu37.mean, width = window_size, 
+                              FUN = function(x) median(x, na.rm = TRUE))
+    
+    fit_tbl = data.frame(TF = TF_name,
+                         Strength = stengths,
+                         TPM_iPSC_mean = iPSC_mean,
+                         TPM_NPC_mean = NPC_mean,
+                         TPM_Neu_mean = Neu_mean) %>%
+      mutate(delta_NPC_iPSC = TPM_NPC_mean - TPM_iPSC_mean,
+             delta_Neu_NPC = TPM_Neu_mean - TPM_NPC_mean,
+             FC_NPC_iPSC = TPM_NPC_mean/TPM_iPSC_mean,
+             FC_Neu_NPC = TPM_Neu_mean/TPM_NPC_mean) %>%
+      left_join(RE_tbl, by = "TF") %>%
+      left_join(expression %>% 
+                  rename(TF = gene) %>%
+                  mutate(TF_log_RE_FC_NPC_iPSC = TPM.Trap_NPC37.mean/TPM.Trap_iPS37.mean,
+                         TF_log_RE_FC_Neu_NPC = TPM.Trap_Neu37.mean/TPM.Trap_NPC37.mean))
+    
+    # Collect data for the TF  
+    master_tbl = bind_rows(master_tbl, fit_tbl)
+  }
+}
+```
+
+Visualize the shifts in responsive targets of TFs
+```{r}
+ranked_TFs = as.character((master_tbl %>%
+                           group_by(TF) %>%
+                           summarise(median_FC = median(FC_NPC_iPSC)) %>%
+                           arrange(median_FC))$TF)
+
+ggplot(data = master_tbl %>% 
+         filter(TF %in% c("CDC5L", "NANOG", "NFE2L3", "KLF4", "NR6A1", "POU2F1",
+                          "MEF2C", "HOXC8", "HOXC4", "POU2F2", "POU5F1", "TAL1",
+                          "ZFP42", "HOXA3", "HOXA6", "ZNF326", "ZNF589")) %>%
+         filter(abs(log_RE_FC_NPC_iPSC) > 0.01) %>%
+         arrange(log_RE_FC_NPC_iPSC) %>%
+         mutate(TF = factor(.$TF, levels = ranked_TFs)),
+       aes(x = TF, 
+           y = log(FC_NPC_iPSC))) +
+  geom_jitter(colour = "dark green", alpha = 0.5, width = 0.2, height = 0) +
+  geom_boxplot(colour = "black", alpha = 0., width = 0.4) +
+  geom_hline(yintercept = 0) +
+  theme_bw() +
+  scale_colour_gradient2(low = "blue", 
+                         mid = "white", 
+                         high = "dark red", midpoint = 0) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+Stat tests for the observed shifts
+```{r}
+TFs_NPC_iPSC = unique((master_tbl %>% 
+  filter(TF %in% c("CDC5L", "NANOG", "NFE2L3", "KLF4", "NR6A1", "POU2F1",
+                   "MEF2C", "HOXC8", "HOXC4", "POU2F2", "POU5F1", "TAL1",
+                   "ZFP42", "HOXA3", "HOXA6", "ZNF326", "ZNF589")) %>%
+  filter(abs(log_RE_FC_NPC_iPSC) > 0.01))$TF)
+
+for (TF_name in TFs_NPC_iPSC) {
+  
+  test_tbl = master_tbl %>% 
+             filter(TF == TF_name)
+             
+  print(TF_name)
+  print(wilcox.test(test_tbl$FC_NPC_iPSC))
+}
+```
+
+
+# Analysis of NPC to Neu transition
+
+
+Next we seek for the averaged shift in TPM for responsive targets (strength larger than a threshold defined above) of TFs.
+```{r}
+master_tbl = data.frame()
+
+strength_filter = list(ELK4 = 60, ESR2 = 20, ESRRB = 20, HOXC8 = 80, NR2C2 = 15, PLAG1 = 0,
+                       POU2F2 = 20, POU5F1 = 20, RORA = 18, KLF4 = 60, NR6A1 = 10, ZNF326 = 10,
+                       ZBTB25 = 8, ZNF589 = 0, ATF2 = 80)
+
+# Estimate shift in RE of a TF
+RE_tbl = RE %>%
+         mutate(TF = gene) %>%
+         filter(TF %in% TFs$List.of.human.TFs.Hughes.paper) %>%
+         mutate(log_RE_FC_NPC_iPSC = log(RE_NPC37.mean/RE_iPS37.mean),
+                log_RE_FC_Neu_NPC = log(RE_Neu37.mean/RE_NPC37.mean),
+                Z_NPC_iPSC = abs((RE_NPC37.mean - RE_iPS37.mean)/sqrt(RE_NPC37.sd**2 + RE_iPS37.sd**2)),
+                Z_Neu_NPC = abs((RE_Neu37.mean - RE_NPC37.mean)/sqrt(RE_Neu37.sd**2 + RE_NPC37.sd**2))) %>%
+         select(TF, log_RE_FC_NPC_iPSC, log_RE_FC_Neu_NPC, Z_NPC_iPSC, Z_Neu_NPC)
+
+# Further analysis is done for the window of size 10.
+window_size = 10
+for (TF_name in names(strength_filter)) {
+  targets_file = list.files(data_path, pattern = TF_name, full.names = T)
+  metatargetome = read.csv(targets_file,
+                           header = TRUE)
+  
+  minimal_strength = strength_filter[[TF_name]]
+  meta_expr_tbl = left_join(metatargetome %>% rename(gene = Target.Gene), 
+                            expression, by = "gene") %>%
+                  filter(Strength > minimal_strength) %>%
+                  mutate(TF = TF_name)
+  number_of_targets = dim(meta_expr_tbl)[1]
+  
+  if (number_of_targets > 11) {
+    # Choose first target strength as representative of the window
+    stengths = zoo::rollapply(meta_expr_tbl$Strength, width = window_size, 
+                              FUN = function(x) first(x))
+    # Even though the variable is called "mean" its actually median
+    iPSC_mean = zoo::rollapply(meta_expr_tbl$TPM.Input_iPS37.mean, width = window_size, 
+                               FUN = function(x) median(x, na.rm = TRUE))
+    NPC_mean = zoo::rollapply(meta_expr_tbl$TPM.Input_NPC37.mean, width = window_size, 
+                              FUN = function(x) median(x, na.rm = TRUE))
+    Neu_mean = zoo::rollapply(meta_expr_tbl$TPM.Input_Neu37.mean, width = window_size, 
+                              FUN = function(x) median(x, na.rm = TRUE))
+    
+    fit_tbl = data.frame(TF = TF_name,
+                         Strength = stengths,
+                         TPM_iPSC_mean = iPSC_mean,
+                         TPM_NPC_mean = NPC_mean,
+                         TPM_Neu_mean = Neu_mean) %>%
+      mutate(delta_NPC_iPSC = TPM_NPC_mean - TPM_iPSC_mean,
+             delta_Neu_NPC = TPM_Neu_mean - TPM_NPC_mean,
+             FC_NPC_iPSC = TPM_NPC_mean/TPM_iPSC_mean,
+             FC_Neu_NPC = TPM_Neu_mean/TPM_NPC_mean) %>%
+      left_join(RE_tbl, by = "TF") %>%
+      left_join(expression %>% 
+                  rename(TF = gene) %>%
+                  mutate(TF_log_RE_FC_NPC_iPSC = TPM.Trap_NPC37.mean/TPM.Trap_iPS37.mean,
+                         TF_log_RE_FC_Neu_NPC = TPM.Trap_Neu37.mean/TPM.Trap_NPC37.mean))
+    
+    # Collect data for the TF  
+    master_tbl = bind_rows(master_tbl, fit_tbl)
+  }
+}
+```
+
+Visualize the shifts in responsive targets of TFs
+```{r}
+ranked_TFs = as.character((master_tbl %>%
+                           group_by(TF) %>%
+                           summarise(median_FC = median(FC_Neu_NPC)) %>%
+                           arrange(median_FC))$TF)
+
+ggplot(data = master_tbl %>% 
+         filter(TF %in% c("ELK4", "ESR2", "ESRRB", "HOXC8", "NR2C2", "PLAG1", "POU2F2",
+                          "POU5F1", "RORA", "KLF4", "NR6A1", "ZNF326", "ZBTB25", "ZNF589", "ATF2")) %>%
+         filter(abs(log_RE_FC_Neu_NPC) > 0.01) %>%
+         arrange(log_RE_FC_Neu_NPC) %>%
+         mutate(TF = factor(.$TF, levels = ranked_TFs)),
+       aes(x = TF, 
+           y = log(FC_Neu_NPC))) +
+  geom_jitter(colour = "dark green", alpha = 0.8, width = 0.2, height = 0) +
+  geom_boxplot(colour = "black", alpha = 0, width = 0.4) +
+  geom_hline(yintercept = 0) +
+  theme_bw() +
+  scale_colour_gradient2(low = "dark blue", 
+                       mid = "white", 
+                       high = "dark red") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+Stat tests for the observed shifts
+```{r}
+TFs_Neu_NPC = unique((master_tbl %>% 
+  filter(TF %in% c("ELK4", "ESR2", "ESRRB", "HOXC8", "NR2C2", "PLAG1", "POU2F2",
+                   "POU5F1", "RORA", "KLF4", "NR6A1", "ZNF326", "ZBTB25", "ZNF589", "ATF2")) %>%
+  filter(abs(log_RE_FC_Neu_NPC) > 0.01))$TF)
+
+for (TF_name in TFs_Neu_NPC) {
+  
+  test_tbl = master_tbl %>% 
+             filter(TF == TF_name)
+             
+  print(TF_name)
+  print(wilcox.test(test_tbl$FC_Neu_NPC))
+}
+```
+
+

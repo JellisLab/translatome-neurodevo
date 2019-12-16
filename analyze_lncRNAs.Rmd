@@ -1,0 +1,199 @@
+---
+title: "Analysis of lncRNAs"
+output:
+  html_notebook:
+    toc: true
+    number_sections: true
+    theme: readable
+author: Marat Mufteev
+date: "`r format(Sys.time(), 'Generated on %d %B, %Y')`"
+---
+
+Upload libraries
+```{r}
+library(dplyr)
+library(ggplot2)
+```
+
+Current directory to generate data paths
+```{r}
+current_dir = getwd()
+```
+
+Upload RNA abundance and translation status data from the following works:
+A) Human heart Ribo-seq. PMID:31155234. Named here as Heart
+B) ESC-derived neurons Ribo-seq. PMID:27655340. Named here as TSC2
+C) iPS-based neurodevelopment TRAP-seq. From this work
+```{r}
+path = paste(current_dir, 
+             "/data/annotation/Homo_sapiens.GRCh38.cdna.all.longer_125nt.tab", 
+             sep = "")
+ids = read.table(path, header = F)
+colnames(ids) = c("Name", "gene", "type")
+filter_names = (ids %>% 
+                  filter(type == "lncRNA") %>%
+                  mutate(Name = gsub("[.][0-9]|[.][0-9][0-9]", "", Name)))$Name
+
+path = paste(current_dir, 
+             "/data/TSC2_Input.tbl", 
+             sep = "")
+input_A = read.table(path, header = T) %>%
+          mutate(Name = gsub("[.][0-9]|[.][0-9][0-9]", "", Name)) %>%
+          filter(Name %in% filter_names) %>%
+          select(Name, contains("TPM")) %>%
+          mutate(TPM.TSC2.mean = apply(X = .[,2:5], MARGIN = 1, FUN = mean, na.rm = T),
+                 TPM.TSC2.sd = apply(X = .[,2:5], MARGIN = 1, FUN = sd, na.rm = T)) %>%
+          select(Name, TPM.TSC2.mean, TPM.TSC2.sd)
+          
+path = paste(current_dir, 
+             "/data/quant.lncRNAs.stats.sf", 
+             sep = "")
+input_B = read.table(path, header = T) %>%
+          dplyr::rename(Name = transcript) %>%
+          filter(Name %in% filter_names) %>%
+          select(Name, contains("TPM.Input"))
+          
+input_join = full_join(input_B, input_A, by = "Name") %>%
+             left_join(ids %>% mutate(Name = gsub("[.][0-9]|[.][0-9][0-9]", "", Name)), 
+                       by = "Name") %>%
+             distinct()
+
+path = paste(current_dir, 
+             "/data/RE.deseq.horizontal.transcripts.quant_normalized.stats.tab", 
+             sep = "")
+# If RE > 1 then store TRUE and FALSE otherwise
+RE_tbl = read.table(path, header = T) %>%
+         dplyr::rename(Name = gene) %>%
+         left_join(ids) %>%
+         filter(type %in% "lncRNA") %>%
+         select(Name, gene, contains("mean")) %>%
+         mutate_if(is.double, function(x) {x > 1.0}) %>%
+         select(-Name) %>%
+         group_by(gene) %>%
+         summarise_all(function(x) {any(x, na.rm = T)})
+
+path = paste(current_dir, 
+             "/data/humanheart_expressedLncRNAs.csv", 
+             sep = "")
+heart = read.csv(path, header = T) %>%
+        mutate(gene = gene_name)
+
+path = paste(current_dir, 
+             "/data/Human_GSE78959_ORF.noncoding.tab", 
+             sep = "")
+TSC_neuron = read.table(path, header = T)
+
+TSC_tbl = data.frame(gene = unique(TSC_neuron$GeneName),
+                     TSC2 = TRUE) %>%
+          left_join(ids) %>%
+          filter(type %in% "lncRNA") %>%
+          group_by(gene) %>%
+          summarise(TSC2 = dplyr::first(TSC2))
+```
+
+Estimate overlap in number of lncRNAs (lincRNAs) between datasets
+```{r}
+ORF_tbl = full_join(RE_tbl, TSC_tbl) %>%
+          select(gene, contains("RE"), contains("TSC2")) %>%
+          mutate_all(function(x) {ifelse(is.na(x), FALSE, x)})
+
+ORF_tbl = full_join(RE_tbl, heart %>% dplyr::rename(gene = gene_name,
+                                                    Heart = translated)) %>%
+          select(gene, contains("RE"), contains("Heart")) %>%
+          mutate_all(function(x) {ifelse(is.na(x), FALSE, x)})
+
+lncRNA_gene = input_join %>%
+              select(gene, contains("mean")) %>%
+              group_by(gene) %>%
+              summarise_all(sum, na.rm = T) %>%
+              na.omit()
+
+# Compare TSC2 and TRAP-seq dataset
+collector_tbl = data.frame()
+for (TPM in c(0.01, 0.1, 1, 5, 10, 25, 40)) {
+  for (A in c("TSC2")) {
+  for (B in colnames(ORF_tbl)[-c(1, 7)]) {
+    lncRNA = lncRNA_gene %>%
+             left_join(heart %>% 
+                         dplyr::rename(gene = gene_name,
+                                       Heart = FPKM_mean_rna_gene) %>%
+                         distinct(gene, Heart))
+    colnames(lncRNA) = gsub("TPM[.]|Input_|[.]mean", "", colnames(lncRNA))
+    
+    if (A != B) {
+      cellA = gsub("RE_|[.]mean", "", A)
+      cellB = gsub("RE_|[.]mean", "", B)
+      print(paste(cellA, cellB))
+      
+      lncRNA = lncRNA %>% select(gene, cellA, cellB)
+      genes_common = (data.frame(lncRNA %>%
+                                 mutate(RES = (.[,2] > TPM) & (.[,3] > TPM)) %>%
+                                 filter(RES == TRUE)))$gene
+      tblA = data.frame(ORF_tbl %>% filter(gene %in% genes_common) %>% select(A))[,1]
+      tblB = data.frame(ORF_tbl %>% filter(gene %in% genes_common) %>% select(B))[,1]
+      
+      common = sum((tblA + tblB) > 0) 
+      
+      
+      
+      count = sum((tblA + tblB) == 2) 
+      collector_tbl = bind_rows(collector_tbl,
+                                data.frame(overlap = round(count/common* 100, 0),
+                                           N = common,
+                                           Tr = count,
+                                           cellA = A,
+                                           cellB = B,
+                                           TPM_threshold = TPM))
+    }
+  }
+}
+}
+
+ggplot(data = collector_tbl,
+       aes(x = TPM_threshold,
+           y = overlap,
+           color = cellB,
+           group = cellB)) +
+  geom_point() +
+  geom_line()
+```
+
+Bar plot to visualize overlap between datasets
+```{r}
+Xmin = 125
+step = 25
+
+bar_df = collector_tbl %>% filter(TPM_threshold == 5)
+xlabels = gsub("TE_|[.]mean", "", bar_df$cellB)
+barplot(bar_df$Tr, xlim = c(-Xmin, 50), axes = FALSE, horiz = T)
+barplot(-bar_df$N, add = TRUE, names.arg = xlabels, axes = FALSE, horiz = T, las = 2)
+abline(h = 0)
+axis(1, lwd = 0, tick = FALSE, at = seq(-Xmin,25,step),
+     labels = c(rev(seq(0,Xmin,step)), seq(step,25,step)), las = 1)
+mtext("Ribo-seq", 1, line = 3, at = 12.5)
+mtext("Input", 1, line = 3, at = -65.5)
+```
+
+Summary table with lncRNAs
+```{r}
+full_tbl = lncRNA_gene %>%
+           left_join(heart %>%
+                     dplyr::rename(gene = gene_name,
+                                   Heart_FPKM_RNA = FPKM_mean_rna_gene,
+                                   Heart_translated = translated) %>%
+                     distinct(gene, Heart_FPKM_RNA, Heart_translated)) %>%
+           left_join(ORF_tbl) %>%
+           dplyr::rename(TSC2_translated = TSC2,
+                         iPS37_translated = RE_iPS37.mean,
+                         NPC37_translated = RE_NPC37.mean,
+                         Neu37_translated = RE_Neu37.mean,
+                         NPC20_translated = RE_NPC20.mean,
+                         Neu20_translated = RE_Neu20.mean)
+```
+
+
+
+
+
+
+

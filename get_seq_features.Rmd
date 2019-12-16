@@ -1,0 +1,138 @@
+---
+title: "Calculate sequence features of transcripts"
+output:
+  html_notebook:
+    toc: true
+    number_sections: true
+    theme: readable
+author: Marat Mufteev
+date: "`r format(Sys.time(), 'Generated on %d %B, %Y')`"
+---
+
+Upload libraries
+```{r}
+library(seqinr)
+library(stringr)
+library(biomaRt)
+library(dplyr)
+library(tidyr)
+library(Biostrings)
+```
+
+Current directory to generate data paths
+```{r}
+current_dir = getwd()
+```
+
+Define function for processing of sequences
+```{r}
+# Function for extraction of sequence statistics 
+sequence_stats <- function(transcripts, ensembl) {
+  
+  # 5'UTR analysis
+  # Get sequences
+  cat("Loading 5'UTR\n")
+  utr5 = biomaRt::getSequence(id = transcripts,
+                              type = "ensembl_transcript_id",
+                              seqType = "5utr",
+                              mart = ensembl)
+  sequences_5utr = utr5$`5utr`
+  ids = utr5$ensembl_transcript_id
+  names(sequences_5utr) = ids
+  
+  # Count uATGs, GC% and sequence length
+  cat("Counting 5'UTR stats\n")
+  uatg_pos = sapply(X = sequences_5utr, FUN = words.pos, pattern="ATG")
+  uatg_count = sapply(X = uatg_pos, FUN = length)
+  length.5utr = sapply(X = sequences_5utr, FUN = nchar)
+  gc_count.5utr = sapply(X = sequences_5utr, FUN = str_count, "G|C")
+  utr5_df = data.frame(transcript = names(uatg_count),
+                       uatg_count,
+                       length.5utr,
+                       gc_count.5utr)
+  
+  # 3'UTR analysis
+  # Get sequences
+  cat("Loading 3'UTR\n")
+  utr3 = biomaRt::getSequence(id = transcripts,
+                              type = "ensembl_transcript_id",
+                              seqType = "3utr",
+                              mart = ensembl)
+  sequences_3utr = utr3$`3utr`
+  ids = utr3$ensembl_transcript_id
+  names(sequences_3utr) = ids
+  
+  # Count G+C% and sequence length
+  cat("Counting 3'UTR stats\n")
+  length.3utr = sapply(X = sequences_3utr, FUN = nchar)
+  gc_count.3utr = sapply(X = sequences_3utr, FUN = str_count, "G|C")
+  utr3_df = data.frame(transcript = names(uatg_count),
+                       length.3utr,
+                       gc_count.3utr)
+
+  # CDS analysis
+  # Get sequences
+  cat("Loading CDS\n")
+  cds = biomaRt::getSequence(id = transcripts,
+                             type = "ensembl_transcript_id",
+                             seqType = "coding",
+                             mart = ensembl)
+  sequences_cds = cds$coding
+  ids = cds$ensembl_transcript_id
+  names(sequences_cds) = ids
+  
+  # Count G+C% and sequence length
+  cat("Counting CDS stats\n")
+  length.cds = sapply(X = sequences_cds, FUN = nchar)
+  gc_count.cds = sapply(X = sequences_cds, FUN = str_count, "G|C")
+  cds_df = data.frame(transcript = names(uatg_count),
+                      length.cds,
+                      gc_count.cds)
+  
+  # Combine 5' 3' CDS and full transcripts tables
+  full_df = full_join(utr5_df, utr3_df, by = "transcript") %>%
+            full_join(cds_df, by = "transcript")
+  
+  return(full_df)
+}
+```
+
+Choose transcripts with RNA present
+```{r}
+# Get transcripts quantified in our samples
+# Remove eGFP from a list
+sailfish_path = paste(current_dir, 
+                      "/data/quant.transcripts.replicates.sf", 
+                      sep = "")
+sailfish = read.table(sailfish_path, header=TRUE) %>%
+           mutate(Name = gsub("[.][0-9]|[.][0-9][0-9]", "", Name))
+transcripts = as.character(sailfish$Name)
+transcripts = transcripts[1 : (length(transcripts) - 1)]
+```
+
+Process transcripts
+```{r}
+# Choose a database
+ensembl = useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+
+# Split sequence analysis into 3 chunks
+# Analysis of everything at once resulted in error in
+# biomaRt::getSequence function.
+# Next, save combined chunks
+max_index = length(transcripts)
+transcripts_chunk1 = sequence_stats(transcripts = transcripts[1:30000],
+                                    ensembl = ensembl)
+transcripts_chunk2 = sequence_stats(transcripts = transcripts[30001:60000],
+                                    ensembl = ensembl)
+transcripts_chunk3 = sequence_stats(transcripts = transcripts[60001:max_index],
+                                    ensembl = ensembl)
+transcripts_all = rbind(transcripts_chunk1,
+                        transcripts_chunk2,
+                        transcripts_chunk3)
+```
+
+
+
+
+
+

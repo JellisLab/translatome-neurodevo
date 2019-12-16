@@ -1,0 +1,319 @@
+---
+title: "Analysis of transcripts sequence features"
+output:
+  html_notebook:
+    toc: true
+    number_sections: true
+    theme: readable
+author: Marat Mufteev
+date: "`r format(Sys.time(), 'Generated on %d %B, %Y')`"
+---
+
+Upload libraries
+```{r}
+library(dplyr)
+library(ggplot2)
+```
+
+Current directory to generate data paths
+```{r}
+current_dir = getwd()
+```
+
+Transcript identifiers, statistics of a sequence, RE from quantile normalization method and counts
+```{r}
+ids_path = paste(current_dir, 
+                 "/data/annotation/grch38.transcript.genes.csv", 
+                 sep = "")
+seq_path = paste(current_dir, 
+                 "/data/transcripts_stats.csv", 
+                 sep = "")
+RE_path = paste(current_dir, 
+                "/data/RE.deseq.horizontal.quant_normalized.stats.tab", 
+                sep = "")
+TPM_path = paste(current_dir, 
+                 "/data/quants.clean.stats.sf", 
+                 sep = "")
+TPM_3UTR_path = paste(current_dir, 
+                      "/data/quant.3UTR.average.sf", 
+                      sep = "")
+RE_3UTR_path = paste(current_dir, 
+                     "/data/RE.3UTR.deseq.horizontal.quant_normalized.stats.tab", 
+                     sep = "")
+
+ids = read.csv(ids_path, header = TRUE)
+seq_stats = read.csv(seq_path, header = T) %>%
+            mutate(gc_percentage.cds = gc_count.cds/length.cds,
+                   gc_percentage.3utr = gc_count.3utr/length.3utr,
+                   gc_percentage.5utr = gc_count.5utr/length.5utr,
+                   gc_percentage.tx = (gc_count.5utr + gc_count.cds + gc_count.3utr)/(length.5utr + length.cds + length.3utr))
+
+RE.genes = read.table(RE_path, header = TRUE) 
+TPM.transcripts = read.csv(TPM_path, header = TRUE)
+
+TPM.3UTR = read.table(TPM_3UTR_path, header = TRUE)
+RE.3UTR = read.table(RE_3UTR_path, header = TRUE)
+```
+
+Combine RE and sequence statistics tables
+```{r}
+# Thresholds for the noise levels
+genes_RE_threshold = 0.3
+qapa_RE_threshold = 0.5
+
+genes_tbl = left_join(ids, seq_stats, by = "transcript") %>%
+            left_join(RE.genes, by = "gene") %>%
+            mutate(RE_iPS37.mean = replace(RE_iPS37.mean, 
+                                           RE_iPS37.noise > genes_RE_threshold, NA),
+                   RE_NPC37.mean = replace(RE_NPC37.mean, 
+                                           RE_NPC37.noise > genes_RE_threshold, NA),
+                   RE_NPC20.mean = replace(RE_NPC20.mean, 
+                                           RE_NPC20.noise > genes_RE_threshold, NA),
+                   RE_Neu37.mean = replace(RE_Neu37.mean, 
+                                           RE_Neu37.noise > genes_RE_threshold, NA),
+                   RE_Neu20.mean = replace(RE_Neu20.mean, 
+                                           RE_Neu20.noise > genes_RE_threshold, NA))
+counts_genes_tbl = left_join(TPM.transcripts, seq_stats, by = "transcript") %>%
+                   left_join(ids, by = "transcript")
+utrs_tbl = left_join(TPM.3UTR %>% select(Name, Length),
+                     RE.3UTR %>% dplyr::rename(Name = UTR3_isoform), by = "Name") %>%
+           mutate(RE_iPS37.mean = replace(RE_iPS37.mean, RE_iPS37.noise > qapa_RE_threshold, NA),
+                  RE_NPC37.mean = replace(RE_NPC37.mean, RE_NPC37.noise > qapa_RE_threshold, NA),
+                  RE_NPC20.mean = replace(RE_NPC20.mean, RE_NPC20.noise > qapa_RE_threshold, NA),
+                  RE_Neu37.mean = replace(RE_Neu37.mean, RE_Neu37.noise > qapa_RE_threshold, NA),
+                  RE_Neu20.mean = replace(RE_Neu20.mean, RE_Neu20.noise > qapa_RE_threshold, NA))
+
+genes_stats = genes_tbl %>%
+              group_by(gene) %>%
+              filter(length.cds == max(length.cds)) %>%
+              arrange(length.cds)
+```
+
+RE dependence on CDS length. Analysis done on a transcript level
+```{r}
+genes_avg = genes_stats %>%
+            mutate(length = floor(length.cds / 500)) %>%
+            group_by(length) %>%
+            summarise(length.cds = mean(length.cds, na.rm = TRUE), 
+                      RE_iPS37 = mean(RE_iPS37.mean, na.rm = TRUE),
+                      RE_NPC37 = mean(RE_NPC37.mean, na.rm = TRUE),
+                      RE_Neu37 = mean(RE_Neu37.mean, na.rm = TRUE),
+                      RE_NPC20 = mean(RE_NPC20.mean, na.rm = TRUE),
+                      RE_Neu20 = mean(RE_Neu20.mean, na.rm = TRUE))
+
+p = ggplot(data = genes_avg)
+for (celltype in c("iPS37", "NPC37", "Neu37")) {
+  p = p + geom_point(aes_string(x = "length.cds",
+                                y = paste("RE_", celltype, sep = ""),
+                                colour = shQuote(celltype)),
+                     alpha = 0.8, size = 2.4)
+  p = p + geom_smooth(aes_string(x = "length.cds",
+                                 y = paste("RE_", celltype, sep = ""),
+                                 colour = shQuote(celltype)), 
+                      se = FALSE, alpha = 0.5)
+}
+p = p + 
+    ggthemes::theme_few() + 
+    xlim(0, 10000) +
+    ylim(0.5, 1.5) +
+    xlab("CDS length") +
+    ylab("Moving average RE")
+p
+```
+
+RE dependence on CDS length. Analysis done on a gene level
+```{r}
+genes_avg = genes_stats %>%
+            group_by(gene) %>%
+            filter(length.cds == max(length.cds)) %>%
+            mutate(length = floor(length.cds / 500)) %>%
+            group_by(length) %>%
+            summarise(length.cds = mean(length.cds, na.rm = TRUE), 
+                      RE_iPS37 = mean(RE_iPS37.mean, na.rm = TRUE),
+                      RE_NPC37 = mean(RE_NPC37.mean, na.rm = TRUE),
+                      RE_Neu37 = mean(RE_Neu37.mean, na.rm = TRUE),
+                      RE_NPC20 = mean(RE_NPC20.mean, na.rm = TRUE),
+                      RE_Neu20 = mean(RE_Neu20.mean, na.rm = TRUE))
+
+p = ggplot(data = genes_avg)
+for (celltype in c("iPS37", "NPC37", "Neu37")) {
+  p = p + geom_point(aes_string(x = "length.cds",
+                                y = paste("RE_", celltype, sep = ""),
+                                colour = shQuote(celltype)),
+                     alpha = 1., size = 2.4)
+  p = p + geom_smooth(aes_string(x = "length.cds",
+                                 y = paste("RE_", celltype, sep = ""),
+                                 colour = shQuote(celltype)), 
+                      se = FALSE, alpha = 0.5)
+}
+p = p + 
+    ggthemes::theme_few() + 
+    xlim(0, 10000) +
+    ylim(0, 3) +
+    xlab("CDS length") +
+    ylab("Moving average RE")
+p
+```
+
+RE dependence on number of uAUGs.
+```{r}
+genes_avg = genes_stats %>%
+            mutate(uatg = floor(uatg_count / 1)) %>%
+            filter(uatg_count < 10) %>%
+            group_by(uatg) %>%
+            summarise(uatg_count = mean(uatg_count, na.rm = TRUE), 
+                      RE_iPS37 = mean(RE_iPS37.mean, na.rm = TRUE),
+                      RE_NPC37 = mean(RE_NPC37.mean, na.rm = TRUE),
+                      RE_Neu37 = mean(RE_Neu37.mean, na.rm = TRUE),
+                      RE_NPC20 = mean(RE_NPC20.mean, na.rm = TRUE),
+                      RE_Neu20 = mean(RE_Neu20.mean, na.rm = TRUE))
+
+p = ggplot(data = genes_avg)
+for (celltype in c("iPS37", "NPC37", "Neu37")) {
+  p = p + geom_point(aes_string(x = "uatg_count",
+                                y = paste("RE_", celltype, sep = ""),
+                                colour = shQuote(celltype)),
+                     alpha = 1., size = 2.4)
+  p = p + geom_smooth(aes_string(x = "uatg_count",
+                                 y = paste("RE_", celltype, sep = ""),
+                                 colour = shQuote(celltype)), 
+                      se = FALSE, alpha = 0.5, method = "lm")
+}
+p = p + 
+    ggthemes::theme_base() + 
+    xlim(0, 10) +
+    ylim(0.9, 1.1) +
+    xlab("uAUG count") +
+    ylab("Moving average RE")
+p
+
+summary(lm(RE_iPS37 ~ uatg_count, data = genes_avg))
+summary(lm(RE_NPC37 ~ uatg_count, data = genes_avg))
+summary(lm(RE_Neu37 ~ uatg_count, data = genes_avg))
+```
+
+RE dependence on number of uAUGs. Visualized with boxplots
+```{r}
+reshape2::melt(as.data.frame(genes_stats) %>%
+               filter(uatg_count < 20) %>%
+               mutate(uatg_marker = floor(uatg_count / 10)) %>%
+               select(uatg_marker, contains("RE")) %>%
+               select(uatg_marker, contains("mean")), 
+               id.vars = "uatg_marker") %>%
+  mutate(celltype = gsub("RE_|[.]mean", "", variable)) %>%
+  ggplot(aes(x = uatg_marker, y = value, group = uatg_marker, colour = celltype, fill = celltype)) +
+  geom_boxplot(alpha = 0.5) +
+  ggthemes::theme_few() +
+  scale_x_continuous(breaks = c(0, 1), labels = c("0-9", "10-20")) +
+  coord_cartesian(ylim = c(0, 2)) +
+  xlab("uAUG count") +
+  ylab("Ribosomal engagement") +
+  facet_wrap(~celltype, scales = "free")
+
+```
+
+RE dependence on GC percentage of a CDS. Analysis done on a transcript level
+```{r}
+genes_avg = genes_stats %>%
+            mutate(gc = floor(gc_percentage.cds / 0.01)) %>%
+            group_by(gc) %>%
+            summarise(gc_percentage = mean(gc_percentage.cds, na.rm = TRUE), 
+                      RE_iPS37 = mean(RE_iPS37.mean, na.rm = TRUE),
+                      RE_NPC37 = mean(RE_NPC37.mean, na.rm = TRUE),
+                      RE_Neu37 = mean(RE_Neu37.mean, na.rm = TRUE),
+                      RE_NPC20 = mean(RE_NPC20.mean, na.rm = TRUE),
+                      RE_Neu20 = mean(RE_Neu20.mean, na.rm = TRUE))
+
+p = ggplot(data = genes_avg)
+for (celltype in c("iPS37", "NPC37", "Neu37")) {
+  p = p + geom_point(aes_string(x = "gc_percentage",
+                                y = paste("RE_", celltype, sep = ""),
+                                colour = shQuote(celltype)),
+                     alpha = 0.8, size = 2.4)
+  p = p + geom_smooth(aes_string(x = "gc_percentage",
+                                 y = paste("RE_", celltype, sep = ""),
+                                 colour = shQuote(celltype)), 
+                      se = FALSE, alpha = 0.5)
+}
+p = p + 
+    ggthemes::theme_few() + 
+    xlim(0.3, 0.8) +
+    ylim(0.5, 1.5) +
+    xlab("GC percentage") +
+    ylab("Moving average RE")
+p
+```
+
+RE dependence on GC percentage of a CDS. Analysis done on a gene level
+```{r}
+genes_avg = genes_stats %>%
+            group_by(gene) %>%
+            filter(length.cds == max(length.cds)) %>%
+            mutate(gc = floor(gc_percentage.cds / 0.01)) %>%
+            group_by(gc) %>%
+            summarise(gc_percentage = mean(gc_percentage.cds, na.rm = TRUE), 
+                      RE_iPS37 = mean(RE_iPS37.mean, na.rm = TRUE),
+                      RE_NPC37 = mean(RE_NPC37.mean, na.rm = TRUE),
+                      RE_Neu37 = mean(RE_Neu37.mean, na.rm = TRUE),
+                      RE_NPC20 = mean(RE_NPC20.mean, na.rm = TRUE),
+                      RE_Neu20 = mean(RE_Neu20.mean, na.rm = TRUE))
+
+p = ggplot(data = genes_avg)
+for (celltype in c("iPS37", "NPC37", "Neu37")) {
+  p = p + geom_point(aes_string(x = "gc_percentage",
+                                y = paste("RE_", celltype, sep = ""),
+                                colour = shQuote(celltype)),
+                     alpha = 1., size = 2.4)
+  p = p + geom_smooth(aes_string(x = "gc_percentage",
+                                 y = paste("RE_", celltype, sep = ""),
+                                 colour = shQuote(celltype)), 
+                      se = FALSE, alpha = 0.5)
+}
+p = p + 
+    ggthemes::theme_few() + 
+    xlim(0.3, 0.8) +
+    ylim(0, 3) +
+    xlab("GC percentage") +
+    ylab("Moving average RE")
+p
+```
+
+RE dependence on 3'UTR length from QAPA estimates
+```{r}
+utrs_avg = utrs_tbl %>%
+           mutate(length = floor(Length / 250)) %>%
+           group_by(length) %>%
+           summarise(length.utr = mean(Length, na.rm = TRUE), 
+                     RE_iPS37 = mean(RE_iPS37.mean, na.rm = TRUE),
+                     RE_NPC37 = mean(RE_NPC37.mean, na.rm = TRUE),
+                     RE_Neu37 = mean(RE_Neu37.mean, na.rm = TRUE),
+                     RE_NPC20 = mean(RE_NPC20.mean, na.rm = TRUE),
+                     RE_Neu20 = mean(RE_Neu20.mean, na.rm = TRUE))
+
+p = ggplot(data = utrs_avg)
+for (celltype in c("iPS37", "NPC37", "Neu37")) {
+  p = p + geom_point(aes_string(x = "length.utr",
+                                y = paste("RE_", celltype, sep = ""),
+                                colour = shQuote(celltype)),
+                     alpha = 0.8, size = 2.4)
+  p = p + geom_smooth(aes_string(x = "length.utr",
+                                 y = paste("RE_", celltype, sep = ""),
+                                 colour = shQuote(celltype)), 
+                      se = FALSE, alpha = 0.5)
+}
+p = p + 
+    ggthemes::theme_few() + 
+    xlim(0, 10000) +
+    xlab("3'UTR length") +
+    ylab("Moving average RE") +
+    scale_y_continuous(breaks = c(0.5, 1.0, 1.5), limits = c(0.5, 1.5))
+
+p = p + 
+    ggthemes::theme_few() + 
+    xlab("3'UTR length") +
+    ylab("Moving average RE") +
+    scale_x_log10(limits = c(1000, 10000)) +
+    scale_y_continuous(breaks = c(0.5, 1.0, 1.5), limits = c(0.5, 1.5))
+p
+```
+

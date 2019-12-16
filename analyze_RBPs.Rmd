@@ -1,0 +1,206 @@
+---
+title: "Analysis of RBPs binding elements"
+output:
+  html_notebook:
+    toc: true
+    number_sections: true
+    theme: readable
+author: Marat Mufteev
+date: "`r format(Sys.time(), 'Generated on %d %B, %Y')`"
+---
+
+Upload libraries
+```{r}
+library(dplyr)
+library(ggplot2)
+```
+
+Current directory to generate data paths
+```{r}
+current_dir = getwd()
+```
+
+Upload RE and conserved binding elements data
+```{r}
+RE_path = paste(current_dir, 
+                "/data/RE.3UTR.deseq.horizontal.quant_normalized.stats.tab", 
+                sep = "")
+UTR_fasta_path = paste(current_dir, 
+                       "/data/qapa_hg19_3utrs.fa", 
+                       sep = "")
+elements_path = paste(current_dir, 
+                      "/data/counts_design.ATTRACT.full.cons_0.9.csv", 
+                      sep = "")
+motifs_path = paste(current_dir, 
+                    "/data/ATtRACT_db.txt", 
+                    sep = "")
+
+# Data on ATtRACT motifs and found binding elements
+elements = read.csv(elements_path, header = T) %>%
+           dplyr::rename(Name = X)
+motifs = read.csv(motifs_path, header = T, sep = "\t") %>%
+         filter(Organism == "Homo_sapiens") %>%
+         mutate(Score = gsub("[*][*]", "", Score),
+                Score = as.numeric(Score)) %>%
+         select(Matrix_id, Score, Len, Gene_name, Motif)
+seqs = Biostrings::readDNAStringSet(UTR_fasta_path)
+seq_features = data.frame(seqs@ranges)[,c("names", "width")] %>%
+               dplyr::rename(Name = names,
+                             L = width)
+
+RE_seq = read.table(RE_path, header = T) %>%
+         dplyr::rename(Name = UTR3_isoform) %>%
+         mutate(RE_iPS37.mean = ifelse(RE_iPS37.noise < 1, RE_iPS37.mean, NA),
+                RE_NPC37.mean = ifelse(RE_NPC37.noise < 1, RE_NPC37.mean, NA),
+                RE_Neu37.mean = ifelse(RE_Neu37.noise < 1, RE_Neu37.mean, NA),
+                RE_NPC20.mean = ifelse(RE_NPC20.noise < 1, RE_NPC20.mean, NA),
+                RE_Neu20.mean = ifelse(RE_Neu20.noise < 1, RE_Neu20.mean, NA)) %>%
+         right_join(seq_features, by = "Name") %>%
+         right_join(elements, by = "Name") %>%
+         mutate(RE_iPS37.loess = predict(loess(formula = RE_iPS37.mean ~ L, data = .), .$L),
+                RE_NPC37.loess = predict(loess(formula = RE_NPC37.mean ~ L, data = .), .$L),
+                RE_Neu37.loess = predict(loess(formula = RE_Neu37.mean ~ L, data = .), .$L),
+                RE_NPC20.loess = predict(loess(formula = RE_NPC20.mean ~ L, data = .), .$L),
+                RE_Neu20.loess = predict(loess(formula = RE_Neu20.mean ~ L, data = .), .$L)) %>%
+         mutate(RE_iPS37.deviation = RE_iPS37.mean - RE_iPS37.loess,
+                RE_NPC37.deviation = RE_NPC37.mean - RE_NPC37.loess,
+                RE_Neu37.deviation = RE_Neu37.mean - RE_Neu37.loess,
+                RE_NPC20.deviation = RE_NPC20.mean - RE_NPC20.loess,
+                RE_Neu20.deviation = RE_Neu20.mean - RE_Neu20.loess)
+```
+
+Estimate enrichment scores
+```{r}
+E_score <- function(RE_elements, bin_size) {
+  processed_tbl = data.frame()
+  print("Initialized E_score function:")
+  for (cell in c("iPS37", "NPC37", "Neu37", "NPC20", "Neu20")) {
+    print(paste("processing ", cell))
+    
+    # Select RE's for a cell type
+    RE_column = paste("RE_", cell, ".mean", sep = "")
+    raw_tbl = RE_elements %>%
+              select(RE_column, L, contains("ENSG0")) %>%
+              dplyr::rename(RE = RE_column)
+    print("25% done")
+    
+    # Keep values only for the mRNAs with binding elements
+    # Convert the rest to NAs and remove these mRNAs
+    clean_tbl = raw_tbl %>%
+                mutate_at(vars(contains("ENSG0")), .funs = funs(ifelse(. == 0, NA, .)))
+    print("50% done")
+    
+    # Split into 2 groups above and below median RE 
+    # for each bin
+    group_tbl = clean_tbl  %>%
+                mutate(L = L %/% bin_size * bin_size) %>%
+                group_by(L) %>%
+                mutate(RE = RE > median(RE, na.rm = T)) %>%
+                ungroup()
+    print("75% done")
+    
+    # Mean number of binding elements per mRNA in each L bin and RE group
+    mean_tbl = group_tbl %>%
+               group_by(L, RE) %>%
+               summarise_all(mean, na.rm = T) %>%
+               filter(!is.na(RE)) %>%
+               ungroup() %>%
+               mutate(celltype = cell)
+    print("100% done")
+    
+    processed_tbl = bind_rows(processed_tbl, mean_tbl)
+  }
+
+  # Return difference and log ratio between means of 2 RE groups
+  difference_tbl = processed_tbl %>%
+                   group_by(L, celltype) %>%
+                   summarise_all(function(x) {x[2] - x[1]}) %>% 
+                   select(-RE)
+  log_ratio_tbl = processed_tbl %>%
+                  group_by(L, celltype) %>%
+                  summarise_all(function(x) {log(x[2]/x[1], 2)}) %>% 
+                  select(-RE)
+  
+  return(list(difference_tbl, log_ratio_tbl))
+}
+
+ES_list = E_score(RE_seq, 400)
+dES_tbl = ES_list[[1]]
+rES_tbl = ES_list[[2]]
+```
+
+Visualize enrichments of motifs. Then multiple motifs from the same RBP can be combined.
+```{r}
+rank_elements_combined <- function(S_tbl, motifs_tbl) {
+  ES_melt = reshape2::melt(S_tbl, id.vars = c("L", "celltype")) %>%
+            dplyr::rename(RBP = variable) %>%
+            tidyr::separate(RBP, c("gene", "ensg", "Matrix_id"), "_") %>%
+            right_join(motifs_tbl, by = "Matrix_id") %>% 
+            filter(L < 4000) %>%
+            group_by(celltype, L, Motif) %>% 
+            filter(!is.na(value)) %>% 
+            summarise(value = dplyr::first(value), 
+                      Score = dplyr::first(Score)) %>%
+            group_by(Motif, celltype) %>%
+            summarise(value_mean = mean(value, na.rm = T),
+                      value_sd = sd(value, na.rm = T)/sqrt(n())) %>%
+            ungroup()
+  
+  genes_number = 20
+  collect_RBPs = data.frame()
+  celltypes = c("iPS37", "NPC37", "Neu37")
+  for (cell in celltypes) {
+    ES_top = ES_melt %>% 
+             filter(celltype == cell) %>%
+             top_n(genes_number, value_mean)
+    ES_bottom = ES_melt %>% 
+                filter(celltype == cell) %>%
+                top_n(-genes_number, value_mean)
+    collect_RBPs = bind_rows(collect_RBPs, ES_top)
+    collect_RBPs = bind_rows(collect_RBPs, ES_bottom)
+  }
+
+  ES_final = ES_melt %>% 
+             filter(Motif %in% unique(collect_RBPs$Motif)) %>%
+             filter(celltype %in% celltypes)
+  
+  ES_final = ES_final %>%
+             ungroup()
+  
+  return(ES_final)
+}
+
+ES_combined_tbl = rank_elements_combined(dES_tbl, motifs)
+
+
+ordered_Motifs = unique((ES_combined_tbl %>%
+                         filter(celltype == "iPS37") %>%
+                         arrange(value_mean))$Motif)
+dodge <- position_dodge(width=0.5) 
+ggplot(data = ES_combined_tbl %>% 
+              arrange(value_mean) %>%
+              mutate(Motif = factor(Motif, levels = unique(Motif))), 
+       aes(x = Motif, y = value_mean, color = celltype)) + 
+  geom_point(size = 3, position=dodge) +
+  geom_errorbar(aes(ymin = value_mean - value_sd,
+                    ymax = value_mean + value_sd),
+                width = 1, position=dodge) +
+  geom_hline(yintercept = 0) + 
+  ggthemes::theme_base(base_size = 16) +
+  ylab("Enrichment Score") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) +
+  coord_cartesian(ylim = c(-1, 1)) +
+  scale_color_manual(values = c("iPS37" = "#00FF99",
+                                "NPC37" = "#FF3300",
+                                "Neu37" = "#0099FF"))
+```
+
+
+
+
+
+
+
+
+
+

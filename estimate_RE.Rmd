@@ -1,0 +1,559 @@
+---
+title: "DESeq calculation of RE and shifts in RE"
+output:
+  html_notebook:
+    toc: true
+    number_sections: true
+    theme: readable
+author: Marat Mufteev
+date: "`r format(Sys.time(), 'Generated on %d %B, %Y')`"
+---
+
+Upload libraries
+```{r}
+library(DESeq2)
+library(dplyr)
+```
+
+Current directory to generate data paths
+```{r}
+current_dir = getwd()
+```
+
+
+# Gene level analysis
+
+
+Upload counts data and gene ids
+Counts from all replicates and celltypes are combined into a single file
+which we upload here.
+```{r}
+counts_path = paste(current_dir, 
+                    "/data/quant.transcripts.replicates.sf", 
+                    sep = "")
+ids_path = paste(current_dir, 
+                 "/data/annotation/grch38.transcript.genes.points.csv", 
+                 sep = "")
+
+counts = read.table(counts_path, header = TRUE)
+ids = read.csv(ids_path, header = TRUE)
+
+# We also added eGFP sequence to the gencode set of transcripts
+ids = bind_rows(ids, data.frame(transcript = c("eGFP"), gene = c("eGFP")))
+```
+
+Append gene names to the counts table and sum counts for all isoforms of each gene
+```{r}
+gene.counts = counts %>%
+              dplyr::rename(transcript = Name) %>%
+              left_join(ids, by = "transcript") %>%
+              select(gene, contains("NumReads.Trap"), contains("NumReads.Input")) %>%
+              group_by(gene) %>%
+              summarise_all(sum) %>%
+              mutate_at(funs(as.integer), .vars = colnames(.)[2:dim(.)[2]]) %>%
+              na.omit()
+colnames(gene.counts) = gsub(colnames(gene.counts), pattern = "NumReads.", replacement = "")
+
+# Check if all values in table are filled
+table(complete.cases(gene.counts))
+```
+
+Prepare matrix for DESeq
+```{r}
+# Remove names of the genes 
+counts.data = gene.counts[,c(2:ncol(gene.counts))]
+
+# Convert counts dataframe to matrix and append gene names
+counts.data = as.matrix(counts.data)
+row.names(counts.data) = gene.counts$gene
+```
+
+TRAP-seq and RNA-seq (Input) are done on RNAs from same lysate for each biological replicate. To use the advantage of same lysate, we calculate RE for each biological replicate separately. Then, average REs for all biological replicates. 
+
+Comment: for this code we denote ribosomal engagement as RE.
+
+Analysis methods tested:
+a) "Horizontal" - decided to use this method
+  - size factors are estimated for all samples of the same cell type
+  - RE is calculated for each biological replicate (same lysate)
+  - RE are quantile normalized between samples
+  - REs are averaged between replicates
+  - Shifts in RE are calculated based on averaged RE
+  - Significance of RE shift is measured by Z-score (abs(meanA - meanB)/sqrt(sdA^2 + sdB^2))
+b) "Vertical"
+  - size factors are estimated only for 2 samples (TRAP and Input) from the same lysate
+  - RE is calculated for each biological replicate (same lysate)
+c) "Interaction"
+  - Shifts in RE are calculated using interaction term in DESeq design (design= ~ assay + celltype + assay:celltype) 
+    assay (TRAP vs Input) and celltype (a pair of compared celltypes)
+
+Decision on a method was based on the 
+a) correlation between replicates
+b) presence of "scaling bias"
+c) resulting shifts in a few control genes
+
+In "Horizontal" method without quantile normalization, we observed scaling bias 
+between replicates of the same celltype. RE values in each biological replicate were 
+multiplied by a replicate specific scaling factor (roughly same order of genes, 
+but different ranges of RE). This bias resulted in a tilted distribution of REs between 
+celltypes (scatterplot RE celltype_A vs RE celltype_B).
+
+Same type of scaling bias was observed in the "Interaction" method. In addition a few
+control genes were missed from the results. Since quantile normalization in the "Horizontal" method removed the bias, we dropped the "Interaction" method.
+
+Finally, correlations between normalized replicates in "Horizontal" method were higher than in 
+"Vertical" method.
+
+Note: DESeq2 no longer supports original version of the code. Quotation marks denote code used to generate RE tables. An alternative code through sizeFactors estimation is suggested.
+
+```{r}
+samples.list = list()
+for (celltype in c("iPS37", "NPC37", "Neu37", "NPC20", "Neu20")) {
+  # Indices for subsets
+  trap_indices = grepl(x = colnames(counts.data), pattern = paste("Trap", celltype, sep = "_"))
+  input_indices = grepl(x = colnames(counts.data), pattern = paste("Input", celltype, sep = "_"))
+  
+  # Select data for each assay and celltype
+  trap.subset = counts.data[, trap_indices]
+  input.subset = counts.data[, input_indices]
+  
+  # Keep genes with more than 150 counts in Input.
+  # Trap counts can be low, since genes can be repressed
+  counts.total = rowSums(input.subset)
+  input.subset = input.subset[counts.total > 150, ]
+  trap.subset = trap.subset[counts.total > 150, ]
+  
+  # Merge Trap and Input data
+  subset = cbind(input.subset, trap.subset)
+  
+  # Prepare samples for DESeq
+  samples = colnames(subset)
+  column.data = data.frame(samples, 
+                           row.names = samples)
+  
+  # Create DESeqDataSet object from matrix with counts
+  dds = DESeq2::DESeqDataSetFromMatrix(countData = subset,
+                                       colData = column.data,
+                                       design =~ samples)
+  
+  # Run DESeq pipeline if betaPrior is FALSE
+  # we calculate MLE of log2FoldChange rather than
+  # MAP (bayesian shrinkage based on average log2FC for each value of mean counts)
+  #### Comment: DESeq2 version since v1.20 (deprecated) v1.22 (not supported) no longer handle cases with same number of samples and coefficients to fit. 
+  #### Code that was used to generate RE tables is in quotation marks.
+  #### An alternative code will be used in this notebook for sharing.
+  "dds = DESeq2::DESeq(dds, betaPrior = FALSE)"
+  dds = DESeq2::estimateSizeFactors(dds)
+  
+  # Get results for Controls versus Mutants and order them according to p-value
+  # Keep in mind that contrast = c('factorName','numeratorLevel','denominatorLevel')
+  for (celltype_replicate in gsub(samples, pattern = "Trap_|Input_", replacement = "")[1:(length(samples)/2)]) {
+    print(paste("Analyzing sample", celltype_replicate, sep = " "))
+    
+    # Original version of analysis
+    "res = DESeq2::results(dds, contrast=c('samples', 
+                          paste('Trap', celltype_replicate, sep = '_'),
+                          paste('Input', celltype_replicate, sep = '_')))
+    # Convert to data.frame
+    res = data.frame(res) %>%
+          mutate(gene = row.names(res),
+                 RE = 2**log2FoldChange) %>%
+          dplyr::rename(log2RE = log2FoldChange) %>%
+          select(gene, RE, log2RE)"
+    
+    # Suggested alternative
+    normed_counts = DESeq2::counts(dds, normalized = T)
+    up_vec = normed_counts[, paste('Trap', celltype_replicate, sep = '_')]
+    down_vec = normed_counts[, paste('Input', celltype_replicate, sep = '_')]
+    res = data.frame(gene = row.names(normed_counts),
+                     RE = up_vec/down_vec) %>%
+          mutate(log2RE = log(RE, 2))
+    
+    samples.list[[celltype_replicate]] = res
+  }
+}
+
+# REs calculated from horizontally normalized counts. First Trap replicates for a celltype are normalized. Then Input replicates for a celltype are normalized. Finally, RE is calculated per replicate.
+RE.deseq.horizontal = Reduce(function(...) merge(..., by='gene', all.x=TRUE, all.y=TRUE, suffixes = ), samples.list)
+colnames(RE.deseq.horizontal) = c("gene", unlist(lapply(X = names(samples.list), FUN = function(x) paste0(c("RE_", "logRE_"), x))))
+```
+
+Next we remove scaling bias in RE values between replicates.
+Quantile normalization of raw REs for all samples. Possible ways of normalization:
+1) Within celltype
+2) A pair of compared celltypes
+3) All celltypes together
+
+Comment:
+"Within celltype" normalization leaves ranges between the celltypes different. As a result,
+scatterplot looks tilted (rotated around the median). Methods 2 and 3 behave similarly. Since for 
+RE shifts we are interested in relative changes rather than absolute we adjust RE ranges for 
+all cell types at the same time.
+
+```{r}
+# Filter data. You can bring back histones if needed.
+RE.deseq.horizontal = RE.deseq.horizontal %>%
+                      select(-contains("log")) %>%
+                      filter(!grepl(gene, pattern = "^MT-|^HIST")) %>%
+                      filter_if(is.numeric, all_vars(. < 100 | is.na(.)))
+
+# Normalzie samples
+gene = RE.deseq.horizontal$gene
+samples = colnames(RE.deseq.horizontal %>% select(-gene))
+RE_quant.norm = preprocessCore::normalize.quantiles(as.matrix(RE.deseq.horizontal %>% select(-gene)))
+RE_quant.norm = data.frame(RE_quant.norm)
+colnames(RE_quant.norm) = samples
+RE_quant.norm = data.frame(cbind(gene, RE_quant.norm))
+```
+
+Average REs for all replicates
+```{r}
+calculate_stats <- function(sample, replicates_data) {
+  # Choose columns corresponding to the sample
+  sample.replicates = select(replicates_data, contains(sample))
+  
+  # Calculate standard deviation and mean
+  rep_sd   = apply(X = sample.replicates, MARGIN = 1, sd, na.rm = TRUE)
+  rep_mean = rowMeans(sample.replicates, na.rm = TRUE)
+  
+  # Extract name of a sample
+  column.name = colnames(sample.replicates)[1]
+  sample.name = strsplit(column.name, split = '_[1-9]')[[1]]
+  
+  # Construct output dataframe
+  output = data.frame(row.names = c(1:length(rep_sd)))
+  output[paste(sample.name, 'mean', sep='.')]  = rep_mean
+  output[paste(sample.name, 'sd', sep='.')]    = rep_sd
+  output[paste(sample.name, 'noise', sep='.')] = rep_sd/rep_mean
+  
+  return(output)
+}
+
+celltypes = c('iPS37', 'NPC37', 'Neu37', 'NPC20', 'Neu20')
+mean.list = lapply(X = celltypes, 
+                   FUN = calculate_stats, 
+                   RE_quant.norm)
+RE.stats = Reduce(x = mean.list, f = cbind) %>%
+           bind_cols(RE.deseq.horizontal[,c(1:2)]) %>%
+           select(-contains(colnames(RE.deseq.horizontal)[2])) %>%
+           select(gene, contains('RE'))
+```
+
+
+# Transcript level analysis
+
+
+Upload counts data and gene ids
+```{r}
+counts_path = paste(current_dir, 
+                    "/data/quant.transcripts.replicates.sf", 
+                    sep = "")
+counts = read.table(counts_path, header = TRUE) %>%
+         dplyr::rename(transcript = Name) %>%
+         select(transcript, contains("NumReads.Trap"), contains("NumReads.Input")) %>%
+         mutate_at(funs(as.integer), .vars = colnames(.)[2:dim(.)[2]]) %>%
+         na.omit()
+colnames(counts) = gsub(colnames(counts), pattern = "NumReads.", replacement = "")
+```
+
+Prepare matrix for DESeq
+```{r}
+# Remove names of the genes 
+counts.data = counts[,c(2:ncol(counts))]
+
+# Convert counts dataframe to matrix and append gene names
+counts.data = as.matrix(counts.data)
+row.names(counts.data) = counts$transcript
+```
+
+Estimate RE with DESeq as a ratio of TRAP/Input
+```{r}
+samples.list = list()
+for (celltype in c("iPS37", "NPC37", "Neu37", "NPC20", "Neu20")) {
+  # Indices for subsets
+  trap_indices = grepl(x = colnames(counts.data), pattern = paste("Trap", celltype, sep = "_"))
+  input_indices = grepl(x = colnames(counts.data), pattern = paste("Input", celltype, sep = "_"))
+  
+  # Select data for each assay and celltype
+  trap.subset = counts.data[, trap_indices]
+  input.subset = counts.data[, input_indices]
+  
+  # Keep genes with more than 150 counts in Input.
+  # Trap counts can be low, since genes can be repressed
+  counts.total = rowSums(input.subset)
+  input.subset = input.subset[counts.total > 150, ]
+  trap.subset = trap.subset[counts.total > 150, ]
+  
+  # Merge Trap and Input data
+  subset = cbind(input.subset, trap.subset)
+  
+  # Prepare samples for DESeq
+  samples = colnames(subset)
+  column.data = data.frame(samples, 
+                           row.names = samples)
+  
+  # Create DESeqDataSet object from matrix with counts
+  dds = DESeq2::DESeqDataSetFromMatrix(countData = subset,
+                                       colData = column.data,
+                                       design =~ samples)
+  
+  # Run DESeq pipeline if betaPrior is FALSE
+  # we calculate MLE of log2FoldChange rather than
+  # MAP (bayesian shrinkage based on average log2FC for each value of mean counts)
+  #### Comment: DESeq2 version since v1.20 (deprecated) v1.22 (not supported) no longer handle cases with same number of samples and coefficients to fit. 
+  #### Code that was used to generate RE tables is in quotation marks.
+  #### An alternative code will be used in this notebook for sharing.
+  "dds = DESeq2::DESeq(dds, betaPrior = FALSE)"
+  dds = DESeq2::estimateSizeFactors(dds)
+  
+  # Get results for Controls versus Mutants and order them according to p-value
+  # Keep in mind that contrast = c('factorName','numeratorLevel','denominatorLevel')
+  for (celltype_replicate in gsub(samples, pattern = "Trap_|Input_", replacement = "")[1:(length(samples)/2)]) {
+    print(paste("Analyzing sample", celltype_replicate, sep = " "))
+    
+    # Original version of analysis
+    "res = DESeq2::results(dds, contrast=c('samples', 
+                          paste('Trap', celltype_replicate, sep = '_'),
+                          paste('Input', celltype_replicate, sep = '_')))
+    # Convert to data.frame
+    res = data.frame(res) %>%
+          mutate(transcript = row.names(res),
+                 RE = 2**log2FoldChange) %>%
+          dplyr::rename(log2RE = log2FoldChange) %>%
+          select(gene, RE, log2RE)"
+    
+    # Suggested alternative
+    normed_counts = DESeq2::counts(dds, normalized = T)
+    up_vec = normed_counts[, paste('Trap', celltype_replicate, sep = '_')]
+    down_vec = normed_counts[, paste('Input', celltype_replicate, sep = '_')]
+    res = data.frame(transcript = row.names(normed_counts),
+                     RE = up_vec/down_vec) %>%
+          mutate(log2RE = log(RE, 2))
+    
+    samples.list[[celltype_replicate]] = res
+  }
+}
+
+# REs calculated from horizontally normalized counts. First Trap replicates for a celltype are normalized. Then Input replicates for a celltype are normalized. Finally, RE is calculated per replicate.
+RE.deseq.horizontal = Reduce(function(...) merge(..., by='transcript', all.x=TRUE, all.y=TRUE, suffixes = ), samples.list)
+colnames(RE.deseq.horizontal) = c("transcript", unlist(lapply(X = names(samples.list), FUN = function(x) paste0(c("RE_", "logRE_"), x))))
+```
+
+Quantile normalize RE values
+```{r}
+# Filter data
+RE.deseq.horizontal = RE.deseq.horizontal %>% 
+                      select(-contains("log")) %>%
+                      filter_if(is.numeric, all_vars(. < 25 | is.na(.)))
+
+# Normalzie samples
+transcript = RE.deseq.horizontal$transcript
+samples = colnames(RE.deseq.horizontal %>% select(-transcript))
+RE_quant.norm = preprocessCore::normalize.quantiles(as.matrix(RE.deseq.horizontal %>% select(-transcript)))
+RE_quant.norm = data.frame(RE_quant.norm)
+colnames(RE_quant.norm) = samples
+RE_quant.norm = data.frame(cbind(transcript, RE_quant.norm))
+```
+
+Average REs for all replicates
+```{r}
+calculate_stats <- function(sample, replicates_data) {
+  # Choose columns corresponding to the sample
+  sample.replicates = select(replicates_data, contains(sample))
+  
+  # Calculate standard deviation and mean
+  rep_sd   = apply(X = sample.replicates, MARGIN = 1, sd, na.rm = TRUE)
+  rep_mean = rowMeans(sample.replicates, na.rm = TRUE)
+  
+  # Extract name of a sample
+  column.name = colnames(sample.replicates)[1]
+  sample.name = strsplit(column.name, split = '_[1-9]')[[1]]
+  
+  # Construct output dataframe
+  output = data.frame(row.names = c(1:length(rep_sd)))
+  output[paste(sample.name, 'mean', sep='.')]  = rep_mean
+  output[paste(sample.name, 'sd', sep='.')]    = rep_sd
+  output[paste(sample.name, 'noise', sep='.')] = rep_sd/rep_mean
+  
+  return(output)
+}
+
+celltypes = c('iPS37', 'NPC37', 'Neu37', 'NPC20', 'Neu20')
+mean.list = lapply(X = celltypes, 
+                   FUN = calculate_stats, 
+                   RE_quant.norm)
+RE.stats = Reduce(x = mean.list, f = cbind) %>%
+           bind_cols(RE.deseq.horizontal[,c(1:2)]) %>%
+           select(-contains(colnames(RE.deseq.horizontal)[2])) %>%
+           select(transcript, contains('RE'))
+```
+
+
+# 3'UTR level analysis
+
+
+Upload 3'UTR quantifications and check if all entries are filled
+```{r}
+UTR_path = paste(current_dir, 
+                 "/data/quant.3UTR.replicates.sf", 
+                 sep = "")
+utr.counts = read.table(UTR_path, header = TRUE) %>%
+             select(Name, contains("NumReads.Trap"), contains("NumReads.Input")) %>%
+             mutate_at(funs(as.integer), .vars = colnames(.)[2:dim(.)[2]])
+colnames(utr.counts) = gsub(colnames(utr.counts), pattern = "NumReads.", replacement = "")
+table(complete.cases(utr.counts))
+```
+
+Prepare matrix for DESeq
+```{r}
+# Remove names of the 3'UTR isoforms
+counts.data = utr.counts[,c(2:ncol(utr.counts))]
+
+# Convert counts dataframe to matrix and append 3'UTR isoforms names
+counts.data = as.matrix(counts.data)
+row.names(counts.data) = utr.counts$Name
+
+# To speed up computations remove rows with almost all counts equal 0
+counts.data = counts.data[rowSums(counts.data) > 1,]
+```
+
+Calculate RE
+```{r}
+samples.list = list()
+for (celltype in c("iPS37", "NPC37", "Neu37", "NPC20", "Neu20")) {
+  # Indices for subsets
+  trap_indices = grepl(x = colnames(counts.data), pattern = paste("Trap", celltype, sep = "_"))
+  input_indices = grepl(x = colnames(counts.data), pattern = paste("Input", celltype, sep = "_"))
+  
+  # Select data for each assay and celltype
+  trap.subset = counts.data[, trap_indices]
+  input.subset = counts.data[, input_indices]
+  
+  # Keep genes with more than 150 counts in Input.
+  # Trap counts can be low, since genes can be repressed
+  counts.total = rowSums(input.subset)
+  input.subset = input.subset[counts.total > 150,]
+  trap.subset = trap.subset[counts.total > 150,]
+  
+  # Merge Trap and Input data
+  subset = cbind(input.subset, trap.subset)
+  
+  # Prepare samples for DESeq
+  samples = colnames(subset)
+  column.data = data.frame(samples, 
+                           row.names = samples)
+  
+  # Create DESeqDataSet object from matrix with counts
+  dds = DESeq2::DESeqDataSetFromMatrix(countData = subset,
+                                       colData = column.data,
+                                       design =~ samples)
+  
+  # Run DESeq pipeline if betaPrior is FALSE
+  # we calculate MLE of log2FoldChange rather than
+  # MAP (bayesian shrinkage based on average log2FC for each value of mean counts)
+  #### Comment: DESeq2 version since v1.20 (deprecated) v1.22 (not supported) no longer handle cases with same number of samples and coefficients to fit. 
+  #### Code that was used to generate RE tables is in quotation marks.
+  #### An alternative code will be used in this notebook for sharing.
+  "dds = DESeq2::DESeq(dds, betaPrior = FALSE)"
+  dds = DESeq2::estimateSizeFactors(dds)
+  
+  # Get results for Controls versus Mutants and order them according to p-value
+  # Keep in mind that contrast = c('factorName','numeratorLevel','denominatorLevel')
+  for (celltype_replicate in gsub(samples, pattern = "Trap_|Input_", replacement = "")[1:(length(samples)/2)]) {
+    print(paste("Analyzing sample", celltype_replicate, sep = " "))
+    
+    # Original version of analysis
+    "res = DESeq2::results(dds, contrast=c('samples', 
+                          paste('Trap', celltype_replicate, sep = '_'),
+                          paste('Input', celltype_replicate, sep = '_')))
+    # Convert to data.frame
+    res = data.frame(res) %>%
+          mutate(gene = row.names(res),
+                 RE = 2**log2FoldChange) %>%
+          dplyr::rename(log2RE = log2FoldChange) %>%
+          select(gene, RE, log2RE)"
+    
+    # Suggested alternative
+    normed_counts = DESeq2::counts(dds, normalized = T)
+    up_vec = normed_counts[, paste('Trap', celltype_replicate, sep = '_')]
+    down_vec = normed_counts[, paste('Input', celltype_replicate, sep = '_')]
+    res = data.frame(gene = row.names(normed_counts),
+                     RE = up_vec/down_vec) %>%
+          mutate(log2RE = log(RE, 2))
+    
+    samples.list[[celltype_replicate]] = res
+  }
+}
+
+# REs calculated from horizontally normalized counts. First Trap replicates for a celltype are normalized. Then Input replicates for a celltype are normalized. Finally, RE is calculated per replicate.
+RE.3UTR.deseq.horizontal = Reduce(function(...) merge(..., by='gene', all.x=TRUE, all.y=TRUE, suffixes = ), samples.list)
+colnames(RE.3UTR.deseq.horizontal) = c("UTR3_isoform", unlist(lapply(X = names(samples.list), FUN = function(x) paste0(c("RE_", "logRE_"), x))))
+```
+
+Normalize RE for all replicates
+```{r}
+# Filter data
+RE.3UTR.deseq.horizontal = RE.3UTR.deseq.horizontal %>%
+                           select(-contains("log")) %>%
+                           filter(!grepl(UTR3_isoform, pattern = "^MT-|^HIST")) %>%
+                           mutate_if(is.numeric, funs(replace(., . > 50, NA)))
+
+# Normalzie samples
+gene = RE.3UTR.deseq.horizontal$UTR3_isoform
+samples = colnames(RE.3UTR.deseq.horizontal %>% select(-UTR3_isoform))
+RE_quant.norm = preprocessCore::normalize.quantiles(as.matrix(RE.3UTR.deseq.horizontal %>% select(-UTR3_isoform)))
+RE_quant.norm = data.frame(RE_quant.norm)
+colnames(RE_quant.norm) = samples
+RE_quant.norm = data.frame(cbind(gene, RE_quant.norm))
+```
+
+Average REs for all replicates
+```{r}
+calculate_stats <- function(sample, replicates_data) {
+  # Choose columns corresponding to the sample
+  sample.replicates = select(replicates_data, contains(sample))
+  
+  # Calculate standard deviation and mean
+  rep_sd   = apply(X = sample.replicates, MARGIN = 1, sd, na.rm = TRUE)
+  rep_mean = rowMeans(sample.replicates, na.rm = TRUE)
+  
+  # Extract name of a sample
+  column.name = colnames(sample.replicates)[1]
+  sample.name = strsplit(column.name, split = '_[1-9]')[[1]]
+  
+  # Construct output dataframe
+  output = data.frame(row.names = c(1:length(rep_sd)))
+  output[paste(sample.name, 'mean', sep='.')]  = rep_mean
+  output[paste(sample.name, 'sd', sep='.')]    = rep_sd
+  output[paste(sample.name, 'noise', sep='.')] = rep_sd/rep_mean
+  
+  return(output)
+}
+
+celltypes = c('iPS37', 'NPC37', 'Neu37', 'NPC20', 'Neu20')
+mean.list = lapply(X = celltypes, 
+                   FUN = calculate_stats, 
+                   RE_quant.norm)
+RE.stats = Reduce(x = mean.list, f = cbind) %>%
+           bind_cols(RE.3UTR.deseq.horizontal[,c(1:2)]) %>%
+           select(-contains(colnames(RE.3UTR.deseq.horizontal)[2])) %>%
+           select(UTR3_isoform, contains('RE'))
+```
+
+
+# Calculation of shifts in RE
+
+
+Shifts and measure of shift significance (Z-score)
+```{r}
+RE_shifts = RE.stats %>%
+            mutate(log2_RE_FC_NPC_iPS = log(RE_NPC37.mean/RE_iPS37.mean, 2),
+                   Z_NPC_iPS = abs((RE_NPC37.mean - RE_iPS37.mean)/sqrt(RE_NPC37.sd**2 + RE_iPS37.sd**2)),
+                   log2_RE_FC_Neu_NPC = log(RE_Neu37.mean/RE_NPC37.mean, 2),
+                   Z_Neu_NPC = abs((RE_Neu37.mean - RE_NPC37.mean)/sqrt(RE_Neu37.sd**2 + RE_NPC37.sd**2)),
+                   log2_RE_FC_RTT_WT_Neu = log(RE_Neu20.mean/RE_Neu37.mean, 2),
+                   Z_RTT_WT_Neu = abs((RE_Neu20.mean - RE_Neu37.mean)/sqrt(RE_Neu20.sd**2 + RE_Neu37.sd**2)))
+```
+
+
+

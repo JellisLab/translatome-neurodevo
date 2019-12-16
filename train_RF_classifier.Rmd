@@ -1,0 +1,137 @@
+---
+title: "Train a random forest classifier for RE predictions"
+output:
+  html_notebook:
+    toc: true
+    number_sections: true
+    theme: readable
+author: Marat Mufteev
+date: "`r format(Sys.time(), 'Generated on %d %B, %Y')`"
+---
+
+Upload libraries
+```{r}
+library(dplyr)
+library(caret)
+library(parallel)
+library(doParallel)
+```
+
+Current directory to generate data paths
+```{r}
+current_dir = getwd()
+```
+
+Upload RE and conserved binding elements data
+```{r}
+RE_path = paste(current_dir, 
+                "/data/RE.3UTR.deseq.horizontal.quant_normalized.stats.tab", 
+                sep = "")
+UTR_fasta_path = paste(current_dir, 
+                       "/data/qapa_hg19_3utrs.fa", 
+                       sep = "")
+elements_path = paste(current_dir, 
+                      "/data/counts_design.ATTRACT.full.cons_0.9.csv", 
+                      sep = "")
+
+# Data on ATtRACT motifs and found binding elements
+elements = read.csv(elements_path, header = T) %>%
+           dplyr::rename(Name = X)
+
+seqs = Biostrings::readDNAStringSet(UTR_fasta_path)
+seq_features = data.frame(seqs@ranges)[,c("names", "width")] %>%
+               dplyr::rename(Name = names,
+                             L = width)
+
+RE_seq = read.table(RE_path, header = T) %>%
+         dplyr::rename(Name = UTR3_isoform) %>%
+         mutate(RE_iPS37.mean = ifelse(RE_iPS37.noise < 1, RE_iPS37.mean, NA),
+                RE_NPC37.mean = ifelse(RE_NPC37.noise < 1, RE_NPC37.mean, NA),
+                RE_Neu37.mean = ifelse(RE_Neu37.noise < 1, RE_Neu37.mean, NA),
+                RE_NPC20.mean = ifelse(RE_NPC20.noise < 1, RE_NPC20.mean, NA),
+                RE_Neu20.mean = ifelse(RE_Neu20.noise < 1, RE_Neu20.mean, NA)) %>%
+         right_join(seq_features, by = "Name") %>%
+         right_join(elements, by = "Name") %>%
+         mutate(RE_iPS37.loess = predict(loess(formula = RE_iPS37.mean ~ L, data = .), .$L),
+                RE_NPC37.loess = predict(loess(formula = RE_NPC37.mean ~ L, data = .), .$L),
+                RE_Neu37.loess = predict(loess(formula = RE_Neu37.mean ~ L, data = .), .$L),
+                RE_NPC20.loess = predict(loess(formula = RE_NPC20.mean ~ L, data = .), .$L),
+                RE_Neu20.loess = predict(loess(formula = RE_Neu20.mean ~ L, data = .), .$L)) %>%
+         mutate(RE_iPS37.deviation = RE_iPS37.mean - RE_iPS37.loess,
+                RE_NPC37.deviation = RE_NPC37.mean - RE_NPC37.loess,
+                RE_Neu37.deviation = RE_Neu37.mean - RE_Neu37.loess,
+                RE_NPC20.deviation = RE_NPC20.mean - RE_NPC20.loess,
+                RE_Neu20.deviation = RE_Neu20.mean - RE_Neu20.loess)
+```
+
+Clean RE data. Analysis was done for multiple 3`UTR length bins to remove the 
+effect of 3'UTR length on RE. Code below is done for an example 3'UTR length bin.
+```{r}
+L_bin = 200
+cell = "iPS37"
+input_tbl = RE_seq %>% 
+              select(L, paste("RE_", cell, ".mean", sep = ""),
+                     contains("ENSG")) %>%
+              dplyr::rename(RE = paste("RE_", cell, ".mean", sep = "")) %>%
+              filter(L > L_bin & L < (L_bin + 200)) %>%
+              select(-L) %>%
+              filter(!is.na(RE))
+# If binding element data has NA substitute with 0.
+input_tbl[is.na(input_tbl)] = 0
+clean_tbl = data.frame(scale(input_tbl))
+```
+
+Define low and high RE classes and clean table
+```{r}
+class_tbl = clean_tbl %>%
+                select(RE, contains("ENSG")) %>%
+                mutate(top_Q = quantile(RE, 0.85),
+                       bottom_Q = quantile(RE, 0.15)) %>%
+                mutate(RE_delta = replace(RE, RE < top_Q & RE > bottom_Q, 0),
+                       RE_delta = replace(RE_delta, RE <= bottom_Q, dplyr::first(bottom_Q)),
+                       RE_delta = replace(RE_delta, RE >= top_Q, dplyr::first(top_Q))) %>%
+                select(-RE) %>%
+                mutate(RE_delta = as.character(RE_delta)) %>%
+                mutate(RE_delta = replace(RE_delta, RE_delta == as.character(bottom_Q), "low"),
+                       RE_delta = replace(RE_delta, RE_delta == "0", "neutral"),
+                       RE_delta = replace(RE_delta, RE_delta == as.character(top_Q), "high")) %>% 
+                filter(RE_delta %in% c("low", "high")) %>%
+                select(RE_delta, contains("ENSG"))
+NA_filter = c(TRUE, !is.na(colSums(class_tbl[,-c(1)])))
+class_tbl = class_tbl[,NA_filter]
+```
+
+Split into train (70%) and test (30%) data
+```{r}
+indices = sample(x = 1:dim(class_tbl)[1], 
+                 size = as.integer(0.7*dim(class_tbl)[1]),
+                 replace = F)
+train_tbl = class_tbl[indices, ]
+test_tbl = class_tbl[-indices, ]
+```
+
+Initiate random forest training. CV to control for overfitting.
+```{r}
+number_of_cores = 2
+cluster <- makeCluster(number_of_cores)
+registerDoParallel(cluster)
+train_control <- trainControl(method="cv", number=5, 
+                              allowParallel = T)
+class_model <- train(RE_delta ~ .,
+                     data = train_tbl, 
+                     trControl = train_control, 
+                     method = "rf", 
+                     importance = TRUE)
+stopCluster(cluster)
+registerDoSEQ()
+```
+
+Save trained model and predictions for further analysis.
+```{r}
+predictions = predict(class_model, test_tbl)
+CM = confusionMatrix(data = factor(test_tbl$RE_delta), 
+                     reference = predictions)
+class_model$testData = test_tbl
+class_model$pred = predict(class_model, test_tbl)
+class_model$testAccuracy = CM$overall[1]
+```
