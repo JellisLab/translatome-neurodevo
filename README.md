@@ -12,6 +12,7 @@ Then, unpack:
 ```bash
 tar -xzf data.tar.gz
 ```
+Data required to run the R notebooks is fully available in the data folder.
 
 ### R notebooks
 1. **estimate_RE.Rmd**
