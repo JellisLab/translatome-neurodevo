@@ -16,10 +16,10 @@ tar -xzf data.tar.gz
 ### R notebooks
 1. estimate_RE.Rmd
 
-Ribosomal engagement is calculated from the TRAP-seq and RNA-seq. Quantile normalization is applied to correct for scaling bias. Stats between replicates is obtained for downstream analyses.
+...Ribosomal engagement is calculated from the TRAP-seq and RNA-seq. Quantile normalization is applied to correct for scaling bias. Stats between replicates is obtained for downstream analyses.
 2. analyze_RBPs.Rmd
 
-RBPs binding elements found in 3'UTRs are correlated with ribosomal engagement. Code in binding_elements folder is used to scan 3'UTR with RBP motifs from ATtRACT database. Identified binding elements are further filtered for the conservation among 100 vertebrates to enrich for functional binding elements.
+...RBPs binding elements found in 3'UTRs are correlated with ribosomal engagement. Code in binding_elements folder is used to scan 3'UTR with RBP motifs from ATtRACT database. Identified binding elements are further filtered for the conservation among 100 vertebrates to enrich for functional binding elements.
 3. train_RF_classifier.Rmd
 
 Random forest classifier is developed for probing the predictive power of convserved 3'UTR binding elements. Each mRNA is classified into either low or high ribosomal engagement groups. 
