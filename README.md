@@ -4,14 +4,14 @@ Code and data for analyses of ribosomal engagement estimated with parallel TRAP-
 ### Data
 Before you run the code in the notebooks, unpack the compressed data.
 First, concatenate data chunks:
-'''bash
+```bash
 cd /downloaded_github_folder/data
 cat data.tar.gz.part_* > data.tar.gz
-'''
+```
 Then, unpack:
-'''bash
+```bash
 tar -xzf data.tar.gz
-'''
+```
 
 ### R notebooks
 1. estimate_RE.Rmd
