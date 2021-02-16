@@ -1,5 +1,5 @@
 ### Introduction
-Code and data for analyses of ribosomal engagement estimated with parallel TRAP-seq and RNA-seq experiments during stem cell based neuronal differentiation. Look up PMID: 32209477 for details.
+Code and data for analyses of ribosomal engagement estimated with parallel TRAP-seq and RNA-seq experiments during stem cell based neuronal differentiation. Look up [PMID: 32209477](https://pubmed.ncbi.nlm.nih.gov/32209477/) for details.
 
 ### Data
 Before you run the code in the notebooks, unpack the compressed data.
